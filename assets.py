@@ -11,6 +11,7 @@ import math
 # Import music control modules
 from music_controller import MusicController
 from gesture_actions import GestureActions
+from ui_manager import UIManager
 
 # ---------------------------
 # Config
@@ -31,18 +32,6 @@ GESTURE_HISTORY_LEN = 5
 def dist(a, b):
     return math.hypot(a[0] - b[0], a[1] - b[1])
 
-def mouth_gap(face):
-    try:
-        top = face[13]
-        bot = face[14]
-        left = face[234]
-        right = face[454]
-    except:
-        return 0
-    gap = dist((top.x, top.y), (bot.x, bot.y))
-    width = dist((left.x, left.y), (right.x, right.y))
-    return gap / width if width else 0
-
 mp_holistic = mp.solutions.holistic
 mp_drawing = mp.solutions.drawing_utils
 
@@ -53,151 +42,172 @@ INDEX_TIP = 8
 INDEX_PIP = 6
 WRIST = 0
 
-# ---------------------------
-# Main
-# ---------------------------
-def main():
-    # Initialize music controller
-    music_controller = MusicController()
-    gesture_actions = GestureActions(music_controller)
-
-    # Initialize MediaPipe Holistic
-    holistic = mp_holistic.Holistic(
-        min_detection_confidence=0.6,
-        min_tracking_confidence=0.6
-    )
-
-    cap = cv2.VideoCapture(0)
-    cap.set(3, CAM_W)
-    cap.set(4, CAM_H)
-
-    frame_count = 0
-    nose_history = deque(maxlen=NOD_HISTORY)
-    gesture_history = deque(maxlen=GESTURE_HISTORY_LEN)
-    last_action = None
-    action_display_time = 0
-
-    print("\n" + "=" * 60)
-    print("🎵 GESTURE MUSIC CONTROLLER 🎵")
-    print("=" * 60)
-    print("\nControls:")
-    print("  • Right Hand Up 🙋‍♂️  → Previous Track ⏮")
-    print("  • Left Hand Up 🙋‍♀️   → Next Track ⏭")
-    print("  • Closed Fist ✊   → Play ▶")
-    print("  • Open Palm ✋     → Pause ⏸")
-    print("  • Index Up ☝️      → Volume Up 🔊")
-    print("  • Peace Sign ✌️    → Volume Down 🔉")
-    print("  • Crossed Arms 🙅  → Mute/Unmute 🔇")
-    print("\n  Press 'q' to quit")
-    print("=" * 60)
-    print("\n🎧 Open your music app (Spotify, Apple Music, etc.)")
-    print("📷 Starting camera for gesture detection...\n")
-
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
-
-        frame = cv2.flip(frame, 1)
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-
-        if frame_count % PROCESS_EVERY_N_FRAMES == 0:
-            results = holistic.process(rgb)
-        frame_count += 1
-
-        gesture = "neutral"
-        face = None
-        current_time = time.time()
-
-        # --------------------------------------------
-        # FACE DETECTION
-        # --------------------------------------------
-        if results.face_landmarks:
-            face = results.face_landmarks.landmark
-            nose_history.append(face[NOSE].y)
-
-        # HANDS
-        lh = results.left_hand_landmarks.landmark if results.left_hand_landmarks else None
-        rh = results.right_hand_landmarks.landmark if results.right_hand_landmarks else None
-
-        # Draw hand mesh
-        if results.left_hand_landmarks:
-            mp_drawing.draw_landmarks(frame, results.left_hand_landmarks, 
-                                     mp.solutions.hands.HAND_CONNECTIONS)
-        if results.right_hand_landmarks:
-            mp_drawing.draw_landmarks(frame, results.right_hand_landmarks, 
-                                     mp.solutions.hands.HAND_CONNECTIONS)
-
-        # RUBBING DETECTION (both hands close together)
-        if lh and rh:
-            d = dist((lh[INDEX_TIP].x, lh[INDEX_TIP].y), 
-                    (rh[INDEX_TIP].x, rh[INDEX_TIP].y))
-            if d < HANDS_JOINED_DIST:
-                gesture = "rubbing"
-
-
-        # ---------------------------
-        # Gesture stabilization
-        # ---------------------------
-        gesture_history.append(gesture)
-        chosen = Counter(gesture_history).most_common(1)[0][0]
-
-        # ---------------------------
-        # Process gestures
-        # ---------------------------
-        action = gesture_actions.process_gesture(chosen, lh, rh, face, results.pose_landmarks.landmark if results.pose_landmarks else None)
+class GestureApp:
+    def __init__(self):
+        self.music_controller = MusicController()
+        self.gesture_actions = GestureActions(self.music_controller)
+        self.ui_manager = UIManager()
         
-        if action:
-            action_map = {
-                "play_pause": "▶⏸ Play/Pause",
-                "volume_up": "🔊 Volume Up",
-                "volume_down": "🔉 Volume Down",
-                "mute": "🔇 Mute Toggle"
-            }
-            last_action = action_map.get(action, action)
-            action_display_time = current_time
-
-        # ---------------------------
-        # DRAW UI
-        # ---------------------------
-        vis = frame.copy()
+        # Initialize MediaPipe Holistic
+        self.holistic = mp_holistic.Holistic(
+            min_detection_confidence=0.6,
+            min_tracking_confidence=0.6
+        )
         
-        # Dark overlay at top for text
-        overlay = vis.copy()
-        cv2.rectangle(overlay, (0, 0), (CAM_W, 80), (0, 0, 0), -1)
-        vis = cv2.addWeighted(overlay, 0.6, vis, 0.4, 0)
+        self.cap = cv2.VideoCapture(0)
+        self.cap.set(3, CAM_W)
+        self.cap.set(4, CAM_H)
         
-        # Title
-        cv2.putText(vis, "Gesture Music Controller", (10, 25),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+        self.frame_count = 0
+        self.nose_history = deque(maxlen=NOD_HISTORY)
+        self.gesture_history = deque(maxlen=GESTURE_HISTORY_LEN)
+        self.last_action = None
+        self.action_display_time = 0
         
-        # Status
-        status = music_controller.get_status()
-        cv2.putText(vis, status, (10, 55),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (100, 255, 100), 2)
+        # Quit Timer
+        self.quit_hold_start = 0
         
-        # Last action (show for 2 seconds)
-        if last_action and (current_time - action_display_time) < 2.0:
-            # Draw action banner
-            cv2.rectangle(vis, (0, CAM_H - 50), (CAM_W, CAM_H), (50, 50, 50), -1)
-            cv2.putText(vis, last_action, (CAM_W // 2 - 80, CAM_H - 18),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
+        # View Mode: 'FULL' or 'MINI'
+        self.view_mode = 'FULL'
+        self.window_name = "Gesture Music Controller"
+
+    def print_controls(self):
+        print("\n" + "=" * 60)
+        print("🎵 GESTURE MUSIC CONTROLLER 🎵")
+        print("=" * 60)
+        print("\nControls:")
+        print("  • Right Hand Up 🙋‍♂️  → Previous Track ⏮")
+        print("  • Left Hand Up 🙋‍♀️   → Next Track ⏭")
+        print("  • Closed Fist ✊   → Play ▶")
+        print("  • Open Palm ✋     → Pause ⏸")
+        print("  • Index Up ☝️      → Volume Up 🔊")
+        print("  • Peace Sign ✌️    → Volume Down 🔉")
+        print("  • Crossed Arms 🙅  → Mute/Unmute 🔇")
+        print("  • Shaka 🤙         → Toggle View 🔄")
+        print("  • Rock 🤘          → Quit (Hold 2s) 🚪")
+        print("\nApp Controls:")
+        print("  • Press 'v'        → Toggle View (Full/Mini)")
+        print("  • Press 'q'        → Quit")
+        print("=" * 60)
+        print("\n🎧 Open your music app (Spotify, Apple Music, etc.)")
+        print("📷 Starting camera for gesture detection...\n")
+
+    def run(self):
+        self.print_controls()
         
-        # Instructions (bottom left)
-        hint_y = CAM_H - 60
-        cv2.putText(vis, "R/L Up: Prev/Next | Fist/Palm: Play/Pause | 1/2 Fingers: Vol | Cross: Mute", 
-                   (5, hint_y), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (180, 180, 180), 1)
+        while True:
+            ret, frame = self.cap.read()
+            if not ret:
+                break
 
-        cv2.imshow("Gesture Music Controller", vis)
+            frame = cv2.flip(frame, 1)
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            break
+            if self.frame_count % PROCESS_EVERY_N_FRAMES == 0:
+                results = self.holistic.process(rgb)
+            self.frame_count += 1
 
-    cap.release()
-    cv2.destroyAllWindows()
-    holistic.close()
-    print("\n👋 Goodbye! Thanks for using Gesture Music Controller.\n")
+            gesture = "neutral"
+            face = None
+            current_time = time.time()
 
+            # --------------------------------------------
+            # FACE DETECTION
+            # --------------------------------------------
+            if results.face_landmarks:
+                face = results.face_landmarks.landmark
+                self.nose_history.append(face[NOSE].y)
+
+            # HANDS
+            lh = results.left_hand_landmarks.landmark if results.left_hand_landmarks else None
+            rh = results.right_hand_landmarks.landmark if results.right_hand_landmarks else None
+
+            # Draw hand mesh (Only in FULL mode)
+            if self.view_mode == 'FULL':
+                if results.left_hand_landmarks:
+                    mp_drawing.draw_landmarks(frame, results.left_hand_landmarks, 
+                                             mp.solutions.hands.HAND_CONNECTIONS)
+                if results.right_hand_landmarks:
+                    mp_drawing.draw_landmarks(frame, results.right_hand_landmarks, 
+                                             mp.solutions.hands.HAND_CONNECTIONS)
+
+            # RUBBING DETECTION (both hands close together)
+            if lh and rh:
+                d = dist((lh[INDEX_TIP].x, lh[INDEX_TIP].y), 
+                        (rh[INDEX_TIP].x, rh[INDEX_TIP].y))
+                if d < HANDS_JOINED_DIST:
+                    gesture = "rubbing"
+
+
+            # ---------------------------
+            # Gesture stabilization
+            # ---------------------------
+            self.gesture_history.append(gesture)
+            chosen = Counter(self.gesture_history).most_common(1)[0][0]
+
+            # ---------------------------
+            # Process gestures
+            # ---------------------------
+            action = self.gesture_actions.process_gesture(chosen, lh, rh, face, results.pose_landmarks.landmark if results.pose_landmarks else None)
+            
+            # Quit Logic (Hold Rock for 2s)
+            if action == "quit":
+                if self.quit_hold_start == 0:
+                    self.quit_hold_start = current_time
+                
+                hold_duration = current_time - self.quit_hold_start
+                self.last_action = f"🚪 Quitting in {2.0 - hold_duration:.1f}s..."
+                self.action_display_time = current_time
+                
+                if hold_duration > 2.0:
+                    print("👋 Quit Gesture Detected!")
+                    break
+            else:
+                self.quit_hold_start = 0 # Reset if gesture lost
+                
+                if action:
+                    if action == "toggle_view":
+                        self.view_mode = 'MINI' if self.view_mode == 'FULL' else 'FULL'
+                        cv2.destroyWindow(self.window_name)
+                        self.last_action = "🔄 View Toggled"
+                        self.action_display_time = current_time
+                    else:
+                        action_map = {
+                            "play_pause": "▶⏸ Play/Pause",
+                            "volume_up": "🔊 Vol Up",
+                            "volume_down": "🔉 Vol Down",
+                            "mute": "🔇 Mute Toggle",
+                            "next_track": "⏭ Next",
+                            "prev_track": "⏮ Previous"
+                        }
+                        self.last_action = action_map.get(action, action)
+                        self.action_display_time = current_time
+
+            # ---------------------------
+            # DRAW UI (Using UIManager)
+            # ---------------------------
+            status = self.music_controller.get_status()
+            
+            if self.view_mode == 'FULL':
+                display_img = self.ui_manager.draw_overlay(frame, status, self.last_action, self.view_mode, self.action_display_time, current_time)
+            else:
+                display_img = self.ui_manager.draw_mini_mode(status, self.last_action, self.action_display_time, current_time)
+
+            cv2.imshow(self.window_name, display_img)
+
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord('q'):
+                break
+            elif key == ord('v'):
+                self.view_mode = 'MINI' if self.view_mode == 'FULL' else 'FULL'
+                # Resize window when switching modes to fit content
+                cv2.destroyWindow(self.window_name) 
+
+        self.cap.release()
+        cv2.destroyAllWindows()
+        self.holistic.close()
+        print("\n👋 Goodbye! Thanks for using Gesture Music Controller.\n")
 
 if __name__ == "__main__":
-    main()
+    app = GestureApp()
+    app.run()

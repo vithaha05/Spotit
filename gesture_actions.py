@@ -29,6 +29,7 @@ class GestureActions:
         self.play_pause_cooldown = 0
         self.mute_cooldown = 0
         self.track_cooldown = 0
+        self.toggle_cooldown = 0
         
         # Gesture Smoothing (Debouncing)
         self.gesture_history = deque(maxlen=5)
@@ -159,6 +160,97 @@ class GestureActions:
         
         return index_up and middle_up and others_down
 
+    def detect_shaka(self, hand_landmarks):
+        """
+        Detect Shaka Gesture (🤙) for View Toggle.
+        Thumb and Pinky extended, middle 3 fingers curled.
+        Uses distance-based checks for robustness.
+        """
+        if not hand_landmarks:
+            return False
+            
+        hand_size = self.get_hand_size(hand_landmarks)
+        
+        # Landmarks
+        WRIST = 0
+        THUMB_TIP = 4
+        INDEX_MCP = 5
+        INDEX_TIP = 8
+        MIDDLE_TIP = 12
+        RING_TIP = 16
+        PINKY_TIP = 20
+        
+        # 1. Thumb Extended
+        # Tip should be far from Index MCP
+        thumb_len = self.dist((hand_landmarks[THUMB_TIP].x, hand_landmarks[THUMB_TIP].y), 
+                            (hand_landmarks[INDEX_MCP].x, hand_landmarks[INDEX_MCP].y))
+        thumb_extended = thumb_len > (hand_size * 0.5)
+        
+        # 2. Pinky Extended
+        # Tip should be far from Wrist
+        pinky_len = self.dist((hand_landmarks[PINKY_TIP].x, hand_landmarks[PINKY_TIP].y), 
+                            (hand_landmarks[WRIST].x, hand_landmarks[WRIST].y))
+        pinky_extended = pinky_len > (hand_size * 1.3)
+        
+        # 3. Middle 3 Fingers Curled (Not Extended)
+        # Tips should be closer to wrist than extended fingers would be
+        # Extended middle finger is approx 2.0 * hand_size
+        # Curled/Loose is typically < 1.5 * hand_size
+        
+        def is_curled(tip_idx):
+            tip = hand_landmarks[tip_idx]
+            wrist = hand_landmarks[WRIST]
+            d = self.dist((tip.x, tip.y), (wrist.x, wrist.y))
+            return d < (hand_size * 1.6) # Threshold for "not fully extended"
+            
+        index_curled = is_curled(INDEX_TIP)
+        middle_curled = is_curled(MIDDLE_TIP)
+        ring_curled = is_curled(RING_TIP)
+        
+        return thumb_extended and pinky_extended and index_curled and middle_curled and ring_curled
+
+    def detect_rock_sign(self, hand_landmarks):
+        """
+        Detect Rock Sign (🤘) for Quit.
+        Index and Pinky extended. Middle, Ring, Thumb curled.
+        """
+        if not hand_landmarks:
+            return False
+            
+        hand_size = self.get_hand_size(hand_landmarks)
+        WRIST = 0
+        THUMB_TIP = 4
+        INDEX_TIP = 8
+        MIDDLE_TIP = 12
+        RING_TIP = 16
+        PINKY_TIP = 20
+        
+        # 1. Index and Pinky Extended
+        def is_extended(tip_idx):
+            tip = hand_landmarks[tip_idx]
+            wrist = hand_landmarks[WRIST]
+            d = self.dist((tip.x, tip.y), (wrist.x, wrist.y))
+            return d > (hand_size * 1.3)
+            
+        index_extended = is_extended(INDEX_TIP)
+        pinky_extended = is_extended(PINKY_TIP)
+        
+        # 2. Middle and Ring Curled
+        def is_curled(tip_idx):
+            tip = hand_landmarks[tip_idx]
+            wrist = hand_landmarks[WRIST]
+            d = self.dist((tip.x, tip.y), (wrist.x, wrist.y))
+            return d < (hand_size * 1.6)
+            
+        middle_curled = is_curled(MIDDLE_TIP)
+        ring_curled = is_curled(RING_TIP)
+        
+        # 3. Thumb Curled (optional, but helps distinguish from Spider-Man/I-Love-You)
+        # Check if thumb tip is close to ring/middle MCPs or just not extended far
+        thumb_curled = is_curled(THUMB_TIP)
+        
+        return index_extended and pinky_extended and middle_curled and ring_curled
+
     def detect_crossed_arms(self, left_hand, right_hand, pose_landmarks):
         """
         Detect Crossed Arms (Wakanda Style) for Mute.
@@ -212,7 +304,11 @@ class GestureActions:
         if not detected_gesture:
             active_hand = left_hand or right_hand
             if active_hand:
-                if self.detect_open_palm(active_hand):
+                if self.detect_shaka(active_hand):
+                    detected_gesture = "toggle_view"
+                elif self.detect_rock_sign(active_hand):
+                    detected_gesture = "quit"
+                elif self.detect_open_palm(active_hand):
                     detected_gesture = "pause"
                 elif self.detect_closed_fist(active_hand):
                     detected_gesture = "play"
@@ -239,7 +335,22 @@ class GestureActions:
         # 3. Trigger Actions
         # ---------------------------
         if stable_gesture:
-            if stable_gesture == "mute":
+            if stable_gesture == "quit":
+                # Require 2 seconds hold for quit to prevent accidents
+                # We reuse toggle_cooldown or create a new one? 
+                # Let's use a specific check in assets.py or handle it here?
+                # Actually, process_gesture usually handles cooldowns.
+                # But for quit, we want to return "quit" only if held?
+                # Or return "quit" and let assets.py handle the timing?
+                # Let's return "quit" and let assets.py handle the "Quitting..." UI and delay.
+                return "quit"
+
+            elif stable_gesture == "toggle_view":
+                if current_time - self.toggle_cooldown > 2.0:
+                    self.toggle_cooldown = current_time
+                    return "toggle_view"
+
+            elif stable_gesture == "mute":
                 if current_time - self.mute_cooldown > 2.0:
                     self.music_controller.mute()
                     self.mute_cooldown = current_time

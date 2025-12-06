@@ -188,6 +188,6 @@ class MusicController:
     
     def get_status(self):
         """Get current playback status string."""
-        play_status = "▶ Playing" if self.is_playing else "⏸ Paused"
+        play_status = "> Playing" if self.is_playing else "|| Paused"
         mute_status = " (Muted)" if self.is_muted else ""
         return f"{play_status}{mute_status}"
